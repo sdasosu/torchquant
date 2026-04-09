@@ -1,0 +1,32 @@
+# Pre-commit hooks configuration
+# https://pre-commit.com
+default_install_hook_types: [pre-commit]
+fail_fast: true
+
+repos:
+  # Standard file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-merge-conflict
+
+  # uv lock file sync
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.9.28
+    hooks:
+      - id: uv-lock
+
+  # Ruff linting & formatting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.14
+    hooks:
+      # Linter must run before formatter
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
