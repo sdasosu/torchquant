@@ -12,10 +12,17 @@ dependencies = [
 [project.optional-dependencies]
 smp = ["segmentation-models-pytorch>=0.3"]
 export = ["executorch", "torchao"]
-dev = ["ruff>=0.11"]
+dev = ["ruff>=0.11", "ty>=0.0"]
 
 [dependency-groups]
-dev = ["ruff>=0.11"]
+dev = [
+    "pytest>=9.0",
+    "pytest-cov>=7.0",
+    "pytest-github-actions-annotate-failures>=0.3",
+    "pytest-xdist>=3.8",
+    "ruff>=0.11",
+    "ty>=0.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/torchquant"]
@@ -99,6 +106,17 @@ convention = "google"
 max-args = 8
 
 [tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "ANN001", # Missing type annotation for function argument
+    "ANN201", # Missing return type annotation for public function
+    "ANN202", # Missing return type annotation for private function
+    "ARG",    # Unused function args - fixtures
+    "SLF001", # Private member accessed - tests need internals
+    "S101",   # Use of assert - expected in tests
+]
+
+[tool.pytest.ini_options]
+addopts = "-n auto --dist=loadscope"
 
 [tool.ruff.format]
 quote-style = "double"
