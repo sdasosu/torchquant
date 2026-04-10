@@ -48,21 +48,57 @@ ATTENTION_PROJECTION_NAMES: frozenset[str] = frozenset(
 )
 
 
+
+
 def classify_module(name: str, module: nn.Module) -> LayerKind | None:
-    """Classify an SMP module: only nn.Linear, skip attention projections."""
-    raise NotImplementedError
+    """Classify a module by supported quantizable kinds only."""
+    lname = name.lower()
+
+    if isinstance(module, nn.ConvTranspose2d):
+        return LayerKind.CONV_TRANSPOSE
+
+    if isinstance(module, nn.Conv2d):
+        if module.groups == module.in_channels and module.in_channels > 1:
+            return LayerKind.DEPTHWISE_CONV
+        if module.kernel_size == (1, 1):
+            return LayerKind.POINTWISE_CONV
+        return LayerKind.CONV2D
+
+    if isinstance(module, nn.Linear):
+        if any(kw in lname for kw in ["q_proj", "k_proj", "v_proj", "qkv", "in_proj"]):
+            return LayerKind.ATTENTION_QKV
+        if any(kw in lname for kw in ["out_proj", "o_proj", "attn.c_proj"]):
+            return LayerKind.ATTENTION_OUT
+        return LayerKind.LINEAR
+
+    if isinstance(module, nn.Embedding):
+        return LayerKind.EMBEDDING
+
+    if "kv_cache" in lname:
+        return LayerKind.KV_CACHE
+
+    return None
 
 
 def find_blocks(model: nn.Module) -> list[tuple[str, nn.Module]]:
     """Find repeated blocks matching HF_BLOCK_PATTERNS."""
-    raise NotImplementedError
+    results: list[tuple[str, nn.Module]] = []
+
+    for name, module in model.named_modules():
+        if any(pattern.match(name) for pattern in HF_BLOCK_PATTERNS):
+            results.append((name, module))
+
+    return results
 
 
 def is_skip_target(name: str) -> bool:
-    """Return True if name is an attention projection (handled by llm adapter)."""
-    raise NotImplementedError
+    leaf = name.split(".")[-1]
+    return leaf in ATTENTION_PROJECTION_NAMES
 
 
 def prepare_model(model: nn.Module) -> nn.Module:
     """Prepare SMP model: eval, freeze, fuse BatchNorm where possible."""
-    raise NotImplementedError
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad = False
+    return model

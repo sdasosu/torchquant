@@ -65,7 +65,12 @@ def find_blocks(model: nn.Module) -> list[tuple[str, nn.Module]]:
     results = []
     for name, layer in model.named_modules():
         if not list(layer.children()):
-            results.append((name, layer))
+            if is_skip_target(name):
+                continue
+            kind = classify_module(name, layer)
+            if kind:
+                #print(f"{name}    :    {kind}")
+                results.append((name, layer))
     return results
 
 #    raise NotImplementedError
@@ -80,9 +85,8 @@ def is_skip_target(name: str) -> bool:
     Args:
         name: Fully-qualified module name.
     """
-    lname = name.lower()
     skip_keywords=["lm_head", "embed", "norm", "head", "dropout", "act", "pooler"]
-    return any(kw in lname for kw in skip_keywords)
+    return any(kw in name for kw in skip_keywords)
 #------------------------------------------------------
 
 #------------------------------------------------------
@@ -109,12 +113,12 @@ def prepare_model(model: nn.Module) -> nn.Module:
 # main function is to test the coverage of this modules 
 # on different types of models (Eg: LLM, SMP nad others) 
 #=============================================================
-# if __name__ == "__main__":
-#     modelx = smp.Unet( encoder_name="resnet34", encoder_weights="imagenet", in_channels=3, classes=1)
-#     results=find_blocks(modelx)
-#     tokenizer = AutoTokenizer.from_pretrained("gpt2")
-#     model2 = AutoModelForCausalLM.from_pretrained("gpt2")
-#     results=find_blocks(model2)
+if __name__ == "__main__":
+    modelx = smp.Unet( encoder_name="resnet34", encoder_weights="imagenet", in_channels=3, classes=1)
+    results=find_blocks(modelx)
+    #tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    #model2 = AutoModelForCausalLM.from_pretrained("gpt2")
+    #results=find_blocks(model2)
 
-#     for name, layer in results:
-#         print(name, ":", layer.__class__.__name__)
+    for name, layer in results:
+        print(name, ":", layer.__class__.__name__)
