@@ -39,7 +39,18 @@ class RuleEngine:
         Returns:
             List of decisions, one per quantized node.
         """
-        raise NotImplementedError
+        decisions: list[QuantDecision] = []
+
+        for node in nodes:
+            for rule in self._rules:
+                decision = rule(node, recipe)
+                if decision is None:
+                    continue
+
+                decisions.append(decision)
+                break
+
+        return decisions
 
 
 def default_rule(node: QuantNode, recipe: QuantRecipe) -> QuantDecision | None:
@@ -52,4 +63,11 @@ def default_rule(node: QuantNode, recipe: QuantRecipe) -> QuantDecision | None:
     Returns:
         A QuantDecision if the node should be quantized, None otherwise.
     """
-    raise NotImplementedError
+    if node.fqn in recipe.ignore:
+        return None
+
+    override = recipe.overrides.get(node.fqn)
+    if override is not None:
+        return QuantDecision(node=node, scheme=override)
+
+    return QuantDecision(node=node, scheme=recipe.default_scheme)

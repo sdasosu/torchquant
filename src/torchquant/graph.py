@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from .adapters import get_adapter
+
 if TYPE_CHECKING:
     from torch import nn
 
@@ -34,7 +36,28 @@ def find_quantizable_nodes(
     Returns:
         List of quantizable nodes found in the model.
     """
-    raise NotImplementedError
+    active_adapter = get_adapter(model) if adapter is None else adapter
+    nodes: list[QuantNode] = []
+
+    for name, module in model.named_modules():
+        if active_adapter.is_skip_target(name):
+            continue
+
+        kind = active_adapter.classify_module(name, module)
+        if kind is None:
+            continue
+
+        nodes.append(
+            QuantNode(
+                fqn=name,
+                kind=kind,
+                param_count=sum(
+                    parameter.numel() for parameter in module.parameters(recurse=False)
+                ),
+            ),
+        )
+
+    return nodes
 
 
 def resolve_modules(
@@ -58,4 +81,5 @@ def resolve_modules(
     Raises:
         KeyError: If a node's FQN does not exist in the model.
     """
-    raise NotImplementedError
+    named_modules = dict(model.named_modules())
+    return {node.fqn: named_modules[node.fqn] for node in nodes}
