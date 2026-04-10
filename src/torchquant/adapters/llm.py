@@ -23,9 +23,7 @@ VALUE_NAMES: frozenset[str] = frozenset({"v_proj", "value"})
 OUTPUT_NAMES: frozenset[str] = frozenset({"o_proj", "out_proj", "c_proj"})
 MERGED_QKV_NAMES: frozenset[str] = frozenset({"query_key_value", "c_attn"})
 
-ALL_ATTENTION_NAMES: frozenset[str] = (
-    QUERY_NAMES | KEY_NAMES | VALUE_NAMES | OUTPUT_NAMES | MERGED_QKV_NAMES
-)
+ALL_ATTENTION_NAMES: frozenset[str] = ( QUERY_NAMES | KEY_NAMES | VALUE_NAMES | OUTPUT_NAMES | MERGED_QKV_NAMES )
 
 
 def classify_module(name: str, module: nn.Module) -> LayerKind | None:
@@ -33,19 +31,47 @@ def classify_module(name: str, module: nn.Module) -> LayerKind | None:
 
     All other nn.Linear layers get LINEAR.
     """
-    raise NotImplementedError
+    leaf = name.split(".")[-1].lower()
+
+    if "kv_cache" in name.lower():
+        return LayerKind.KV_CACHE
+
+    if isinstance(module, nn.Embedding):
+        return LayerKind.EMBEDDING
+
+    if isinstance(module, nn.Linear):
+        if leaf in QUERY_NAMES or leaf in KEY_NAMES or leaf in VALUE_NAMES or leaf in MERGED_QKV_NAMES:
+            return LayerKind.ATTENTION_QKV
+        if leaf in OUTPUT_NAMES:
+            return LayerKind.ATTENTION_OUT
+        return LayerKind.LINEAR
+
+    return None
+
 
 
 def find_blocks(model: nn.Module) -> list[tuple[str, nn.Module]]:
     """Find transformer layer blocks (e.g. model.layers.0, model.layers.1, ...)."""
-    raise NotImplementedError
+    results: list[tuple[str, nn.Module]] = []
+
+    for name, module in model.named_modules():
+        parts = name.split(".")
+        if len(parts) >= 3 and parts[-1].isdigit():
+            if parts[-2] in {"layers", "h", "layer", "blocks"}:
+                results.append((name, module))
+
+    return results
 
 
 def is_skip_target(name: str) -> bool:
     """LLM adapter does not skip attention projections — it handles them."""
-    raise NotImplementedError
+    raise False
+
 
 
 def prepare_model(model: nn.Module) -> nn.Module:
     """Prepare LLM: eval mode, freeze parameters."""
-    raise NotImplementedError
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad = False
+    return model
