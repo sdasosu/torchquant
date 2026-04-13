@@ -25,13 +25,19 @@ class HessianObserver:
     Accumulates H = 2 * X^T @ X (input outer products) which
     approximates the Hessian of the layer-wise reconstruction loss.
 
-    For a linear layer with weight W ∈ R^{out × in}, GPTQ minimises:
+    For a linear layer with weight W in R^{out x in}, GPTQ minimises:
 
-        ||WX - W_q X||_F²
+        ||WX - W_q X||_F^2
 
     whose Hessian w.r.t. W is H = 2 * X @ X^T (in GPTQ notation where
-    X is in × N).  This observer accumulates that matrix incrementally
-    across calibration batches so memory never exceeds ``in_features²``.
+    X is in x N).  This observer accumulates that matrix incrementally
+    across calibration batches so memory never exceeds ``in_features^2``.
+
+    The last input dimension is assumed to be ``in_features`` (the
+    PyTorch ``nn.Linear`` convention).  This observer therefore does
+    not expose a ``channel_dim`` parameter the way ``MinMaxObserver``
+    and ``AWQObserver`` do; GPTQ is only meaningful for linear layers
+    whose channel axis is the last dim.
 
     Args:
         damping: Tikhonov regularisation added to the diagonal of H
@@ -45,10 +51,6 @@ class HessianObserver:
         self._sample_count: int = 0
         self._damping = damping
 
-    # ------------------------------------------------------------------
-    # Forward hook
-    # ------------------------------------------------------------------
-
     def __call__(
         self,
         module: object,
@@ -61,27 +63,35 @@ class HessianObserver:
         because H depends on the activations seen by W, not on Wx.
 
         Supports inputs of shape:
-            - ``(batch, in_features)``          — fully-connected / MLP
-            - ``(batch, seq_len, in_features)`` — transformer linear layers
+            - ``(batch, in_features)``          -- fully-connected / MLP
+            - ``(batch, seq_len, in_features)`` -- transformer linear layers
+
+        4-D inputs (CNN conv-style ``(batch, C, H, W)``) are intentionally
+        rejected with a ``ValueError``: GPTQ is scoped to LLM linear
+        layers in this codebase, and silently flattening conv activations
+        would produce a Hessian with the wrong semantic meaning.
 
         The update rule (matching the original GPTQ codebase) is::
 
-            X  ← reshape to (in_features, N)   where N = batch * seq
+            X  <- reshape to (in_features, N)   where N = batch * seq
             H  += 2 / N_total * X @ X^T
 
         Dividing by ``N_total`` (total samples seen so far) keeps H as a
         proper average across calibration batches.
 
         Args:
-            module: The hooked layer (unused — we only need the input).
+            module: The hooked layer (unused -- we only need the input).
             inputs: Tuple of layer inputs; ``inputs[0]`` is the activation.
             output: Layer output (unused).
+
+        Raises:
+            ValueError: If ``inputs[0]`` is not 2-D or 3-D.
         """
         x: Tensor = inputs[0].detach().float()
 
         # Flatten to 2-D: (n_tokens, in_features)
         if x.dim() == 3:
-            # (batch, seq_len, in_features) → (batch * seq_len, in_features)
+            # (batch, seq_len, in_features) -> (batch * seq_len, in_features)
             x = x.reshape(-1, x.shape[-1])
         elif x.dim() != 2:
             raise ValueError(
@@ -89,44 +99,32 @@ class HessianObserver:
                 f"got shape {tuple(x.shape)}."
             )
 
-        n_new = x.shape[0]           # number of new token / sample rows
+        n_new = x.shape[0]  # number of new token / sample rows
         in_features = x.shape[1]
 
         # X transposed to (in_features, n_new) for the outer product
-        # H_batch = 2 * X^T @ X  —  shape (in_features, in_features)
-        x_t = x.T                    # (in_features, n_new)
-        h_batch = 2.0 * (x_t @ x)   # (in_features, in_features)
+        # producing H_batch with shape (in_features, in_features).
+        x_t = x.T  # (in_features, n_new)
+        h_batch = 2.0 * (x_t @ x)  # (in_features, in_features)
 
         if self._hessian is None:
             # First batch: initialise with zeros on the correct device/dtype
             self._hessian = torch.zeros(
-                in_features, in_features,
+                in_features,
+                in_features,
                 dtype=torch.float32,
                 device=x.device,
             )
 
-        # Online update: keep a running *sum* weighted by sample count so
-        # that get_stats() can return the properly scaled average at any
-        # time without storing all batches.
-        #
-        # Running mean update:
-        #   H_new = (n_old * H_old + n_new * H_batch / 2) * 2 / n_total
-        # Simplified to an additive accumulation of the raw sum, divided
-        # once in get_stats():
-        #
-        #   _hessian += h_batch   (unnormalised running sum)
-        #   divide by total_n in get_stats() to recover the mean.
+        # Accumulate the raw sum here; get_stats() divides by
+        # _sample_count to recover the running mean on demand.
         self._hessian += h_batch
         self._sample_count += n_new
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def get_stats(self) -> dict[str, Tensor]:
         """Return Hessian statistics.
 
-        Returns the *averaged* Hessian H = (2 / N) * Σ X_i^T X_i with
+        Returns the *averaged* Hessian H = (2 / N) * Sum X_i^T X_i with
         optional Tikhonov damping added to the diagonal.
 
         Returns:
@@ -146,8 +144,8 @@ class HessianObserver:
         # Normalise the running sum by total sample count.
         h = self._hessian / self._sample_count
 
-        # Tikhonov / diagonal damping — stabilises the Cholesky factorisation
-        # performed later by GPTQ.  λ = damping * mean(diag(H)).
+        # Tikhonov / diagonal damping -- stabilises the Cholesky factorisation
+        # performed later by GPTQ.  lambda = damping * mean(diag(H)).
         if self._damping > 0.0:
             lam = self._damping * h.diagonal().mean()
             h = h + lam * torch.eye(h.shape[0], dtype=h.dtype, device=h.device)
