@@ -40,13 +40,15 @@ class HessianObserver:
     whose channel axis is the last dim.
 
     Args:
-        damping: Tikhonov regularisation added to the diagonal of H
-            before it is returned, expressed as a fraction of the mean
-            diagonal value.  Prevents singularity for dead neurons.
-            GPTQ paper uses 0.01.  Set to 0.0 to disable.
+        damping: Optional Tikhonov regularisation added to the diagonal
+            of H before it is returned, expressed as a fraction of the
+            mean diagonal value.  Defaults to 0.0 so the observer stays
+            a pure statistics collector; the GPTQ quantizer applies its
+            own damping internally.  Set to a positive value to request
+            pre-damped output explicitly.
     """
 
-    def __init__(self, damping: float = 0.01) -> None:
+    def __init__(self, damping: float = 0.0) -> None:
         self._hessian: Tensor | None = None
         self._sample_count: int = 0
         self._damping = damping
@@ -158,11 +160,13 @@ class HessianObserver:
         self._sample_count = 0
 
 
-def create(damping: float = 0.01) -> HessianObserver:
+def create(damping: float = 0.0) -> HessianObserver:
     """Factory function for HessianObserver.
 
     Args:
-        damping: Diagonal regularisation fraction (see :class:`HessianObserver`).
+        damping: Diagonal regularisation fraction.
+            Defaults to 0.0 so GPTQ can apply damping inside the
+            quantizer while this observer remains a pure collector.
 
     Returns:
         A freshly initialised :class:`HessianObserver`.
