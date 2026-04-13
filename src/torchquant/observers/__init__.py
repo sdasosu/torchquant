@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from torchquant._types import Algorithm
+
+from . import awq, hessian, smoothquant
+
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from torchquant._types import Algorithm
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,14 @@ class ObserverSpec:
     targets: frozenset[str]
 
 
+_FACTORIES: dict[Algorithm, Callable[[], Any] | None] = {
+    Algorithm.RTN: None,
+    Algorithm.GPTQ: hessian.create,
+    Algorithm.AWQ: awq.create,
+    Algorithm.SMOOTHQUANT: smoothquant.create,
+}
+
+
 def get_observer_specs(
     algorithm: Algorithm,
     targets: frozenset[str],
@@ -34,16 +44,33 @@ def get_observer_specs(
     and the calibration layer (which needs concrete ObserverSpecs).
 
     Mapping:
-        RTN         → [] (no calibration needed)
-        GPTQ        → [HessianObserver]
-        AWQ         → [AWQObserver]
-        SMOOTHQUANT → [SmoothQuantObserver]
+        RTN         -> [] (no calibration needed)
+        GPTQ        -> [HessianObserver]
+        AWQ         -> [AWQObserver]
+        SMOOTHQUANT -> [SmoothQuantObserver]
+
+    The factories are called with zero arguments, so the resulting
+    observers use their default ``channel_dim``.  This default
+    (``-1``) matches the LLM linear-layer convention
+    ``(batch, seq_len, in_features)``.  CNN layers (``(N, C, H, W)``)
+    require ``channel_dim=1`` instead; callers that need to mix
+    layouts should construct ``ObserverSpec`` instances directly
+    rather than relying on this helper.
 
     Args:
         algorithm: The quantization algorithm from QuantScheme.
         targets: FQN patterns for layers that need observation.
 
     Returns:
-        List of ObserverSpecs to pass to run_calibration().
+        List of ObserverSpecs to pass to run_calibration().  Returns an
+        empty list for algorithms (such as RTN) that need no calibration.
+
+    Raises:
+        KeyError: If ``algorithm`` is not a recognised member of
+            ``_FACTORIES`` (i.e. a new ``Algorithm`` value was added
+            without a corresponding entry here).
     """
-    raise NotImplementedError
+    factory = _FACTORIES[algorithm]
+    if factory is None:
+        return []
+    return [ObserverSpec(factory=factory, targets=targets)]

@@ -13,8 +13,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import torch
-
 if TYPE_CHECKING:
     from torch import Tensor
 
@@ -38,7 +36,7 @@ class AWQObserver:
 
     The scale s is derived from the activation magnitude:
 
-        s_j = mean(|X_j|)^α,   α ∈ [0, 1]  (default α = 0.5)
+        s_j = mean(|X_j|)^alpha,   alpha in [0, 1]  (default alpha = 0.5)
 
     This observer accumulates mean(|X|) per input channel across
     all calibration batches so the GPTQ / AWQ solver can compute
@@ -46,9 +44,9 @@ class AWQObserver:
 
     Args:
         alpha: Exponent applied to activation magnitudes when computing
-            scales in ``get_stats``.  α=0 → uniform scaling (disabled),
-            α=1 → full activation-proportional scaling.  The AWQ paper
-            uses α=0.5 as the default after grid search.
+            scales in ``get_stats``.  alpha=0 -> uniform scaling (disabled),
+            alpha=1 -> full activation-proportional scaling.  The AWQ paper
+            uses alpha=0.5 as the default after grid search.
         channel_dim: Dimension index to treat as the *input-channel* axis.
             Use ``-1`` (default) for LLM linear layers
             ``(batch, seq_len, in_features)``; use ``1`` for CNNs
@@ -66,10 +64,6 @@ class AWQObserver:
         self._sample_count: int = 0
         self._alpha = alpha
         self._channel_dim = channel_dim
-
-    # ------------------------------------------------------------------
-    # Forward hook
-    # ------------------------------------------------------------------
 
     def __call__(
         self,
@@ -96,41 +90,28 @@ class AWQObserver:
         """
         x: Tensor = inputs[0].detach().float().abs()
 
-        # Normalise channel_dim to a positive index.
         ch = self._channel_dim % x.dim()
         n_channels = x.shape[ch]
 
-        # Move channel axis to front, flatten everything else →
+        # Move channel axis to front, flatten everything else ->
         # shape (n_channels, N) where N = product of all other dims.
-        flat = x.movedim(ch, 0).reshape(n_channels, -1)  # (C, N)
+        flat = x.movedim(ch, 0).reshape(n_channels, -1)
+        batch_mean = flat.mean(dim=1)
+        n_new = flat.shape[1]
 
-        # Sum of absolute values across the non-channel tokens/pixels.
-        # Dividing by flat.shape[1] converts to a per-batch mean;
-        # we accumulate the mean rather than the raw sum so that batches
-        # of different sizes are weighted equally (matches AWQ paper).
-        batch_mean = flat.mean(dim=1)   # (C,)
-        n_new = flat.shape[1]           # tokens / spatial positions
-
+        # Token-weighted running mean: combine the prior accumulated mean
+        # weighted by sample_count with the new batch mean weighted by
+        # n_new tokens.  We weight per-token (not per-batch) so a long
+        # sequence contributes proportionally more than a short one;
+        # the original AWQ paper uses per-batch means and we deliberately
+        # diverge here for stability against varying sequence lengths.
         if self._act_mean is None:
-            self._act_mean = torch.zeros(
-                n_channels,
-                dtype=torch.float32,
-                device=x.device,
-            )
-
-        # Welford-style incremental mean over *tokens* (not batches) so
-        # that long sequences are not down-weighted vs short ones.
-        #   mean_new = mean_old + (batch_mean * n_new - mean_old * n_new)
-        #                         / (sample_count + n_new)
-        # Simplified to a weighted accumulation:
-        self._act_mean = (
-            self._act_mean * self._sample_count + batch_mean * n_new
-        ) / (self._sample_count + n_new)
+            self._act_mean = batch_mean
+        else:
+            self._act_mean = (
+                self._act_mean * self._sample_count + batch_mean * n_new
+            ) / (self._sample_count + n_new)
         self._sample_count += n_new
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def get_stats(self) -> dict[str, Tensor]:
         """Return activation importance statistics.
@@ -157,14 +138,13 @@ class AWQObserver:
                 "Run at least one forward pass through the hooked module."
             )
 
-        act_mean = self._act_mean.clone()
-
-        # Clamp to avoid zero/negative values before pow().
-        act_mean_clamped = act_mean.clamp(min=1e-8)
-        scale = act_mean_clamped.pow(self._alpha)
+        # clamp() already returns a fresh tensor, so deriving scale from
+        # it is allocation-free; act_mean is cloned separately so callers
+        # cannot mutate observer state through the returned dict.
+        scale = self._act_mean.clamp(min=1e-8).pow(self._alpha)
 
         return {
-            "act_mean": act_mean,
+            "act_mean": self._act_mean.clone(),
             "scale": scale,
         }
 
@@ -174,7 +154,7 @@ class AWQObserver:
         self._sample_count = 0
 
 
-def create(alpha: float = 0.5, channel_dim: int = -1) -> AWQObserver:
+def create(*, alpha: float = 0.5, channel_dim: int = -1) -> AWQObserver:
     """Factory function for AWQObserver.
 
     Args:
