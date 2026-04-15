@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -45,6 +46,30 @@ class QuantRegistry:
         return len(self._records)
 
 
+def apply_records_inplace(model: nn.Module, registry: QuantRegistry) -> None:
+    """Write quantized weights into a caller-owned model in-place.
+
+    This is an internal helper shared by ``rebuild_model`` and the pipeline.
+    User code should prefer ``rebuild_model`` unless it already owns a
+    throwaway deep copy of ``model``.
+
+    Args:
+        model: Model whose modules will receive quantized weights.
+        registry: Registry containing quantization results.
+
+    Raises:
+        KeyError: If a record FQN does not exist in ``model``.
+    """
+    for fqn, record in registry:
+        try:
+            target = model.get_submodule(fqn)
+        except AttributeError as error:
+            raise KeyError(
+                f"Quantized module FQN {fqn!r} not found in model."
+            ) from error
+        target.get_parameter("weight").data.copy_(record.result.quantized_weight)
+
+
 def rebuild_model(model: nn.Module, registry: QuantRegistry) -> nn.Module:
     """Create a new model with quantized weights from the registry.
 
@@ -58,4 +83,6 @@ def rebuild_model(model: nn.Module, registry: QuantRegistry) -> nn.Module:
     Returns:
         A new model with quantized weights applied.
     """
-    raise NotImplementedError
+    new_model = copy.deepcopy(model)
+    apply_records_inplace(new_model, registry)
+    return new_model
