@@ -10,6 +10,7 @@ from .adapters import get_adapter
 from .calibration import run_calibration
 from .graph import find_quantizable_nodes, resolve_modules
 from .observers import get_observer_specs
+from .quantizers._oracle import bound_fqn
 from .registry import QuantRecord, QuantRegistry, apply_records_inplace
 from .rules import RuleEngine, default_rule
 
@@ -41,12 +42,12 @@ def _init_quantizer_map() -> None:
     )
 
 
-def quantize_model(
+def build_quantized_model(
     model: nn.Module,
     recipe: QuantRecipe,
     calibration_data: Iterable[Any] | None = None,
-) -> nn.Module:
-    """Quantize a model end-to-end.
+) -> tuple[nn.Module, QuantRegistry]:
+    """Build a quantized model and keep the registry metadata.
 
     Pipeline stages:
         1. Auto-detect model adapter
@@ -63,7 +64,7 @@ def quantize_model(
         calibration_data: Optional calibration dataset for methods that need it.
 
     Returns:
-        A new model with quantized weights.
+        A tuple of the quantized model and its quantization registry.
     """
     _init_quantizer_map()
     working = copy.deepcopy(model)
@@ -71,9 +72,10 @@ def quantize_model(
     adapter.prepare_model(working)
     nodes = find_quantizable_nodes(working, adapter)
     decisions = RuleEngine([default_rule]).decide(nodes, recipe)
+    registry = QuantRegistry()
 
     if not decisions:
-        return working
+        return working, registry
 
     algorithm_targets: dict[Algorithm, set[str]] = {}
     all_specs: list[ObserverSpec] = []
@@ -109,24 +111,53 @@ def quantize_model(
         stats = {}
 
     modules = resolve_modules(working, [decision.node for decision in decisions])
-    registry = QuantRegistry()
 
     for decision in decisions:
         module = modules[decision.node.fqn]
         layer_stats = stats.get(decision.node.fqn, {})
-        result = QUANTIZER_MAP[decision.scheme.algorithm](
-            module,
-            decision.scheme,
-            layer_stats,
-        )
+        with bound_fqn(module, decision.node.fqn):
+            result = QUANTIZER_MAP[decision.scheme.algorithm](
+                module,
+                decision.scheme,
+                layer_stats,
+            )
+        bias = getattr(module, "bias", None)
         registry.add(
             QuantRecord(
                 fqn=decision.node.fqn,
                 kind=decision.node.kind,
                 scheme=decision.scheme,
                 result=result,
+                original_bias=None if bias is None else bias.detach().clone(),
             )
         )
 
     apply_records_inplace(working, registry)
-    return working
+    return working, registry
+
+
+def quantize_model(
+    model: nn.Module,
+    recipe: QuantRecipe,
+    calibration_data: Iterable[Any] | None = None,
+) -> nn.Module:
+    """Quantize a model end-to-end.
+
+    Pipeline stages:
+        1. Auto-detect model adapter
+        2. Prepare model (eval, freeze, fuse BN)
+        3. Discover quantizable nodes
+        4. Assign schemes via rule engine
+        5. Run calibration if needed
+        6. Apply quantizers
+        7. Rebuild model with quantized weights
+
+    Args:
+        model: The PyTorch model to quantize.
+        recipe: Quantization recipe describing what and how to quantize.
+        calibration_data: Optional calibration dataset for methods that need it.
+
+    Returns:
+        A new model with quantized weights.
+    """
+    return build_quantized_model(model, recipe, calibration_data)[0]

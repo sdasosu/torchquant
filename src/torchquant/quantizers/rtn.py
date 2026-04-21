@@ -9,12 +9,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from . import QuantResult
+import torch
+
+from . import QuantResult, _oracle
 from ._fake_quant import (
     fake_quantize_2d,
+    fake_quantize_2d_with_int,
     is_conv2d_module,
     is_embedding_module,
     is_linear_module,
+    resolve_group_layout,
 )
 
 if TYPE_CHECKING:
@@ -44,24 +48,54 @@ def quantize_layer(
     """
     del stats
 
+    oracle_fqn = _oracle.get_bound_fqn(module) if _oracle.is_recording() else None
+    exact_quantized_weight: Tensor | None = None
+
     if is_linear_module(module) or is_embedding_module(module):
         weight = module.get_parameter("weight").detach()
-        fake_q, scales, zero_points = fake_quantize_2d(
-            weight,
-            bits=scheme.weight_bits,
-            group_size=scheme.group_size,
-            symmetric=scheme.symmetric,
-        )
+        if oracle_fqn is None:
+            fake_q, scales, zero_points = fake_quantize_2d(
+                weight,
+                bits=scheme.weight_bits,
+                group_size=scheme.group_size,
+                symmetric=scheme.symmetric,
+            )
+        else:
+            fake_q, scales, zero_points, q_int = fake_quantize_2d_with_int(
+                weight,
+                bits=scheme.weight_bits,
+                group_size=scheme.group_size,
+                symmetric=scheme.symmetric,
+            )
+            _oracle.record(oracle_fqn, q_int.view_as(weight))
+            exact_quantized_weight = _dequantize_int_weight(
+                q_int, scales, zero_points, scheme
+            )
         quantized_weight = fake_q.view_as(weight)
     elif is_conv2d_module(module):
         weight = module.get_parameter("weight").detach()
         flat_weight = weight.reshape(weight.shape[0], -1)
-        fake_q, scales, zero_points = fake_quantize_2d(
-            flat_weight,
-            bits=scheme.weight_bits,
-            group_size=scheme.group_size,
-            symmetric=scheme.symmetric,
-        )
+        if oracle_fqn is None:
+            fake_q, scales, zero_points = fake_quantize_2d(
+                flat_weight,
+                bits=scheme.weight_bits,
+                group_size=scheme.group_size,
+                symmetric=scheme.symmetric,
+            )
+        else:
+            fake_q, scales, zero_points, q_int = fake_quantize_2d_with_int(
+                flat_weight,
+                bits=scheme.weight_bits,
+                group_size=scheme.group_size,
+                symmetric=scheme.symmetric,
+            )
+            _oracle.record(oracle_fqn, q_int.reshape_as(weight))
+            exact_quantized_weight = _dequantize_int_weight(
+                q_int,
+                scales,
+                zero_points,
+                scheme,
+            ).reshape_as(weight)
         quantized_weight = fake_q.reshape_as(weight)
     else:
         supported = "nn.Linear, nn.Conv2d, and nn.Embedding"
@@ -69,9 +103,32 @@ def quantize_layer(
             f"RTN quantize_layer supports {supported}, got {type(module).__name__}."
         )
 
-    return QuantResult(
+    result = QuantResult(
         quantized_weight=quantized_weight,
         scales=scales,
         zero_points=zero_points,
         original_weight=weight.clone(),
     )
+    if exact_quantized_weight is not None:
+        object.__setattr__(
+            result, "_oracle_exact_quantized_weight", exact_quantized_weight
+        )
+    return result
+
+
+def _dequantize_int_weight(
+    q_int: Tensor,
+    scales: Tensor,
+    zero_points: Tensor | None,
+    scheme: QuantScheme,
+) -> Tensor:
+    group_width, n_groups = resolve_group_layout(
+        in_features=q_int.shape[1],
+        group_size=scheme.group_size,
+    )
+    grouped_int = q_int.to(torch.float32).reshape(q_int.shape[0], n_groups, group_width)
+    grouped_scales = scales.to(torch.float32).unsqueeze(-1)
+    if zero_points is None:
+        return (grouped_int * grouped_scales).reshape_as(q_int)
+    grouped_zero_points = zero_points.to(torch.float32).unsqueeze(-1)
+    return ((grouped_int - grouped_zero_points) * grouped_scales).reshape_as(q_int)
