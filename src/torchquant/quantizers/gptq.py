@@ -11,11 +11,12 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from . import QuantResult
+from . import QuantResult, _oracle
 from ._fake_quant import (
     compute_scale_zero,
     is_linear_module,
     quantize_column,
+    quantize_column_with_int,
     resolve_group_layout,
 )
 
@@ -95,6 +96,12 @@ def quantize_layer(
     current_group = -1
     current_scale: Tensor | None = None
     current_zero: Tensor | None = None
+    oracle_fqn = _oracle.get_bound_fqn(module) if _oracle.is_recording() else None
+    oracle_int_weight = (
+        None
+        if oracle_fqn is None
+        else torch.empty_like(original_weight, dtype=torch.int32)
+    )
 
     for start in range(0, quantized_weight.shape[1], _BLOCKSIZE):
         stop = min(start + _BLOCKSIZE, quantized_weight.shape[1])
@@ -126,13 +133,23 @@ def quantize_layer(
 
             assert current_scale is not None
             diagonal_entry = block_hessian_inverse[block_column, block_column]
-            quantized_column = quantize_column(
-                block_weight[:, block_column],
-                current_scale,
-                current_zero,
-                bits=scheme.weight_bits,
-                symmetric=scheme.symmetric,
-            )
+            if oracle_int_weight is None:
+                quantized_column = quantize_column(
+                    block_weight[:, block_column],
+                    current_scale,
+                    current_zero,
+                    bits=scheme.weight_bits,
+                    symmetric=scheme.symmetric,
+                )
+            else:
+                quantized_column, q_int_column = quantize_column_with_int(
+                    block_weight[:, block_column],
+                    current_scale,
+                    current_zero,
+                    bits=scheme.weight_bits,
+                    symmetric=scheme.symmetric,
+                )
+                oracle_int_weight[:, column_index] = q_int_column
             column_error = (
                 block_weight[:, block_column] - quantized_column
             ) / diagonal_entry
@@ -149,9 +166,13 @@ def quantize_layer(
                 block_error @ error_propagation[start:stop, stop:]
             )
 
-    return QuantResult(
+    result = QuantResult(
         quantized_weight=quantized_weight.to(original_weight.dtype),
         scales=scales,
         zero_points=zero_points,
         original_weight=original_weight,
     )
+    if oracle_fqn is not None and oracle_int_weight is not None:
+        _oracle.record(oracle_fqn, oracle_int_weight)
+        object.__setattr__(result, "_oracle_exact_quantized_weight", quantized_weight)
+    return result

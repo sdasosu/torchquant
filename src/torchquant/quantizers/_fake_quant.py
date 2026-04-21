@@ -50,6 +50,38 @@ def fake_quantize_2d(
         ``float32``. ``zero_points`` is ``None`` for symmetric quantization,
         otherwise an ``int32`` tensor with the same shape as ``scales``.
     """
+    dequant, scales, zero_points, _ = _fake_quantize_2d_impl(
+        weight_2d,
+        bits=bits,
+        group_size=group_size,
+        symmetric=symmetric,
+    )
+    return dequant, scales, zero_points
+
+
+def fake_quantize_2d_with_int(
+    weight_2d: Tensor,
+    *,
+    bits: int,
+    group_size: int,
+    symmetric: bool,
+) -> tuple[Tensor, Tensor, Tensor | None, Tensor]:
+    """Return fake-quantized weights plus the integer tensor before dequantize."""
+    return _fake_quantize_2d_impl(
+        weight_2d,
+        bits=bits,
+        group_size=group_size,
+        symmetric=symmetric,
+    )
+
+
+def _fake_quantize_2d_impl(
+    weight_2d: Tensor,
+    *,
+    bits: int,
+    group_size: int,
+    symmetric: bool,
+) -> tuple[Tensor, Tensor, Tensor | None, Tensor]:
     if weight_2d.dim() != 2:
         raise ValueError(f"weight_2d must be 2-D, got shape {tuple(weight_2d.shape)}.")
 
@@ -78,7 +110,12 @@ def fake_quantize_2d(
         ).clamp(0, q_max)
         dequant = (q_weight - zero_points_fp32.unsqueeze(-1)) * scales.unsqueeze(-1)
 
-    return dequant.reshape_as(weight_2d).to(weight_2d.dtype), scales, zero_points
+    return (
+        dequant.reshape_as(weight_2d).to(weight_2d.dtype),
+        scales,
+        zero_points,
+        q_weight.reshape_as(weight_2d).to(torch.int32),
+    )
 
 
 def compute_scale_zero(
@@ -130,6 +167,25 @@ def quantize_column(
     symmetric: bool,
 ) -> Tensor:
     """Round one weight column and dequantize it back to float32."""
+    dequantized, _ = quantize_column_with_int(
+        weight_col,
+        scale_col,
+        zero_col,
+        bits=bits,
+        symmetric=symmetric,
+    )
+    return dequantized
+
+
+def quantize_column_with_int(
+    weight_col: Tensor,
+    scale_col: Tensor,
+    zero_col: Tensor | None,
+    *,
+    bits: int,
+    symmetric: bool,
+) -> tuple[Tensor, Tensor]:
+    """Round one weight column, returning dequantized and integer forms."""
     if weight_col.dim() != 1:
         raise ValueError(
             f"weight_col must be 1-D, got shape {tuple(weight_col.shape)}."
@@ -142,7 +198,7 @@ def quantize_column(
     if symmetric:
         q_max = _symmetric_qmax(bits)
         q_weight = torch.round(weight_fp32 / scale_fp32).clamp(-q_max, q_max)
-        return q_weight * scale_fp32
+        return q_weight * scale_fp32, q_weight.to(torch.int32)
 
     if zero_col is None:
         raise ValueError("zero_col must be provided for asymmetric quantization.")
@@ -150,7 +206,7 @@ def quantize_column(
     q_max = _asymmetric_qmax(bits)
     zero_fp32 = zero_col.to(torch.float32)
     q_weight = (torch.round(weight_fp32 / scale_fp32) + zero_fp32).clamp(0, q_max)
-    return (q_weight - zero_fp32) * scale_fp32
+    return (q_weight - zero_fp32) * scale_fp32, q_weight.to(torch.int32)
 
 
 def _validate_bits(bits: int) -> None:
