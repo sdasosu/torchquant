@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "A universal PyTorch model quantization toolkit"
 requires-python = ">=3.12"
 dependencies = [
+    "numpy>=2.0.0",
     "pydantic>=2.12.5",
     "torch>=2.4",
     "tqdm>=4.66",
