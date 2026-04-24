@@ -138,6 +138,9 @@ max-args = 8
 [tool.pytest.ini_options]
 addopts = "-n auto --dist=loadscope"
 
+[tool.ty.src]
+exclude = ["examples"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
