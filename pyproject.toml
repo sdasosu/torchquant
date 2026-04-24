@@ -24,6 +24,13 @@ dev = [
     "ruff>=0.11",
     "ty>=0.0",
 ]
+examples = [
+    "accelerate>=1.13.0",
+    "marimo>=0.23.2",
+    "matplotlib>=3.10.9",
+    "torchvision>=0.21.0",
+    "transformers>=5.6.2",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/torchquant"]
@@ -114,6 +121,18 @@ max-args = 8
     "ARG",    # Unused function args - fixtures
     "SLF001", # Private member accessed - tests need internals
     "S101",   # Use of assert - expected in tests
+]
+"examples/**/*.py" = [
+    "ANN001",  # marimo cell args are inferred by the runtime
+    "ANN202",  # marimo cell functions carry no return annotation
+    "ARG",     # marimo forwards values through cell args even when unused
+    "E501",    # demo markdown strings exceed the line limit
+    "FBT003",  # `.train(False)` is the idiomatic PyTorch eval toggle
+    "INP001",  # examples/ is intentionally not a package
+    "N803",    # cell args mirror imported names like ResNet18_Weights
+    "PLR1711", # marimo markdown-only cells end with a bare `return`
+    "RUF001",  # markdown cells contain Chinese/unicode punctuation
+    "T201",    # print aids live demos
 ]
 
 [tool.pytest.ini_options]
